@@ -2,23 +2,27 @@
 
 - 😺 本项目完全由chatgpt完成
 - 👍 让Panther X2可以驱动NPU/VPU/GPU
-- 😋 使用NPU需要先安装RKNN-Toolkit2
+- 😋 运行NPU测试需要在python3.11下运行
 ```bash
-curl -fL \
-  https://raw.githubusercontent.com/clfang666/Panther-x2-NPU-VPU/main/scripts/rknn-manager.sh \
-  -o rknn-manager.sh
-
-chmod +x rknn-manager.sh
-./rknn-manager.sh
+# python3.13 没有 rknn-toolkit-lite2 包，已知3.11可以，3.12 不清楚
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv uv python install 3.11
+uv venv --python 3.11
+# 激活虚拟环境
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+# !!! 需要此文件才可以正常驱动 !!!
+sudo mv librknnrt.so /usr/lib
+./detect-once.py 1.jpg
 ```
 
-GitHub Actions 会获取固定版本的 Armbian 构建框架，生成 Ubuntu 24.04 Noble 镜像，并校验
+GitHub Actions 会获取固定版本的 Armbian 构建框架，生成 Debian 13 Trixie 镜像，并校验
 Rockchip BSP 6.1 的 VPU、NPU、RGA 和 IEP 驱动配置。
 
 ## 固定构建输入
 
 - Armbian build：`70a242faa308c57be5ed636897dfee77de350773`
-- 系统：Ubuntu 24.04 Noble
+- 系统：Debian 13 Trixie
 - 板卡：`panther-x2-vendor`
 - 内核：Rockchip vendor BSP 6.1
 - 内核源码提交：`5280f9b4336199c4025c8eed894d2b4e2268dcc6`
@@ -33,8 +37,8 @@ Radxa 源码与较新 GCC 的两处兼容性问题。
 ## 云端编译
 
 推送到 `main` 后，工作流
-`.github/workflows/build-pantherx2-noble.yml` 会自动开始编译。也可以在 GitHub 的
-**Actions → Build Panther X2 Noble BSP 6.1 → Run workflow** 中手动启动。
+`.github/workflows/build-pantherx2-trixie.yml` 会自动开始编译。也可以在 GitHub 的
+**Actions → Build Panther X2 Trixie BSP 6.1 → Run workflow** 中手动启动。
 
 构建产物包括：
 
@@ -42,7 +46,7 @@ Radxa 源码与较新 GCC 的两处兼容性问题。
 - `*.img.xz.sha256`：镜像 SHA-256；
 - `pantherx2-validation.txt`：镜像内容与 VPU/NPU DTB 校验报告。
 
-工作流会分别挂载镜像的根分区和 FAT `/boot` 分区，然后检查 Ubuntu 24.04、内核
+工作流会分别挂载镜像的根分区和 FAT `/boot` 分区，然后检查 Debian 13、内核
 配置、启动 DTB、加速器节点状态及 NPU 电源引用。只有全部通过，镜像才会作为
 Actions Artifact 上传。
 
@@ -54,7 +58,7 @@ cd build
 git checkout 70a242faa308c57be5ed636897dfee77de350773
 rsync -a ../Panther-x2-NPU-VPU/armbian/ ./
 ./compile.sh \
-  RELEASE=noble \
+  RELEASE=trixie \
   BUILD_DESKTOP=no \
   BUILD_MINIMAL=no \
   KERNEL_CONFIGURE=no \
