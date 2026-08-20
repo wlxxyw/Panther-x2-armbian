@@ -123,7 +123,7 @@ jobs:
             EXPERT=yes \
             pantherx2-image build
 
-      - name: Verify the generated firmware
+      - name: Verify the generated firmware & Backup kernel
         shell: bash
         run: |
           set -euo pipefail
@@ -201,6 +201,79 @@ jobs:
               return 1
             fi
             echo "OK DTB property: ${node}/${property}=${actual}"
+          }
+          backup_kernel(){
+            local kernel_uname="$1"
+            local platform="$2"
+            local kernel_save_path="$3"
+
+            if [[ -e "${kernel_save_path}" && ! -d "${kernel_save_path}" ]]; then
+              echo "kernel_save_path exists but is not directory, remove: ${kernel_save_path}"
+              rm -f "${kernel_save_path}"
+            fi
+
+            if [[ ! -d "${kernel_save_path}" ]]; then
+              echo "create kernel_save_path: ${kernel_save_path}"
+              mkdir -p "${kernel_save_path}"
+            fi
+
+            local kernel_tmp_path="$(mktemp -d)"
+            cd ${kernel_tmp_path} || return 1
+            echo "Backup kernel: ${kernel_uname}"
+            #
+            # backup boot
+            #
+            cp -rf "${mount_dir}/boot/"*-"${kernel_uname}" . || true
+            # config-${kernel_uname} 已验证
+            if [[ -f "${mount_dir}/boot/initrd.img" && ! -f "initrd.img-${kernel_uname}" ]]; then
+              cp -f "${mount_dir}/boot/initrd.img" "initrd.img-${kernel_uname}"
+            fi
+            if [[ -f "${mount_dir}/boot/uInitrd" && ! -f "uInitrd-${kernel_uname}" ]]; then
+              cp -f "${mount_dir}/boot/uInitrd" "uInitrd-${kernel_uname}"
+            fi
+            if [[ -f "${mount_dir}/boot/System.map" && ! -f "System.map-${kernel_uname}" ]]; then
+              cp -f "${mount_dir}/boot/System.map" "System.map-${kernel_uname}"
+            fi
+            if [[ -f "${mount_dir}/boot/Image" && ! -f "vmlinuz-${kernel_uname}" ]]; then
+              cp -f "${mount_dir}/boot/Image" "vmlinuz-${kernel_uname}"
+            fi
+            tar -czf "${kernel_save_path}/boot-${kernel_uname}.tar.gz" .
+            rm -rf *
+            
+            #
+            # backup dtb
+            #
+            if [[ -d "${mount_dir}/boot/dtb/${platform}" ]]; then
+              cp -rf "${mount_dir}/boot/dtb/${platform}/"* .
+              tar -czf "${kernel_save_path}/dtb-${platform}-${kernel_uname}.tar.gz" .
+              rm -rf *
+            else
+              echo "::error miss /boot/dtb/${platform}"
+              return 1
+            fi
+
+            #
+            # backup modules
+            #
+            if [[ -d "${mount_dir}/usr/lib/modules/${kernel_uname}" ]]; then
+              cp -rf "${mount_dir}/usr/lib/modules/${kernel_uname}" .
+              tar -czf "${kernel_save_path}/modules-${kernel_uname}.tar.gz" .
+              rm -rf *
+            else
+              echo "::error miss /usr/lib/modules/${kernel_uname}"
+              return 1
+            fi
+
+            #
+            # checksum
+            #
+            cd "${kernel_save_path}"
+            rm -rf "${kernel_tmp_path}"
+            sha256sum *.tar.gz > sha256sums
+
+            tar -czf "${kernel_save_path}/${kernel_uname}.tar.gz" sha256sums *.tar.gz
+            find "${kernel_save_path}" -maxdepth 1  -type f  ! -name "${kernel_uname}.tar.gz"  -delete
+            echo "Kernel backup done"
           }
 
           image="$(find /builder/build/output/images -maxdepth 1 -type f -name '*.img' -print -quit)"
@@ -318,6 +391,8 @@ jobs:
           echo "Kernel config: $(basename "${kernel_config}")"
           echo 'VPU/NPU/RGA/IEP image validation: passed'
 
+          backup_kernel "6.1.115-vendor-rk35xx" "rockchip" "/builder/build/output/kernel"
+
       - name: Compress and checksum image
         shell: bash
         run: |
@@ -341,6 +416,7 @@ jobs:
         with:
           name: Panther-X2-Trixie-BSP61-${{ github.run_number }}
           path: |
+            /builder/build/output/kernel/*.tar.gz
             /builder/build/output/images/*.img.xz
             /builder/build/output/images/*.img.xz.sha256
             pantherx2-validation.txt
@@ -369,6 +445,7 @@ jobs:
 
           tag="pantherx2-trixie-${GITHUB_RUN_NUMBER}"
           gh release create "${tag}" \
+            /builder/build/output/kernel/*.tar.gz \
             /builder/build/output/images/*.img.xz \
             /builder/build/output/images/*.img.xz.sha256 \
             "${GITHUB_WORKSPACE}/pantherx2-validation.txt" \
