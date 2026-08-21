@@ -1,9 +1,10 @@
 # Panther X2 NPU/VPU Armbian
 
-- 😺 本项目完全由chatgpt完成
-- 👍 让Panther X2可以驱动NPU/VPU/GPU
+- 😺 本项目基于[clfang666/Panther-x2-NPU-VPU](https://github.com/clfang666/Panther-x2-NPU-VPU)项目修改
+- 👍 让Panther X2可以驱动NPU/VPU/GPU，同时蓝牙 USB 功能完好
 - 😋 运行NPU测试需要在python3.11下运行
 ```bash
+cd examples
 # python3.13 没有 rknn-toolkit-lite2 包，已知3.11可以，3.12 不清楚
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv uv python install 3.11
@@ -45,7 +46,7 @@ Radxa 源码与较新 GCC 的两处兼容性问题。
 **Actions → Build Panther X2 Trixie BSP 6.1 → Run workflow** 中手动启动。
 
 构建产物包括：
-
+- `6.1.115-vendor-rk35xx.tar.gz`：可用于armbian-update脚本使用的内核替换包，无需重做系统；
 - `*.img.xz`：压缩后的 Armbian 镜像；
 - `*.img.xz.sha256`：镜像 SHA-256；
 - `pantherx2-validation.txt`：镜像内容与 VPU/NPU DTB 校验报告。
@@ -54,67 +55,17 @@ Radxa 源码与较新 GCC 的两处兼容性问题。
 配置、启动 DTB、加速器节点状态及 NPU 电源引用。只有全部通过，镜像才会作为
 Actions Artifact 上传。
 
-## 本地复现
-
-```bash
-git clone https://github.com/armbian/build.git
-cd build
-git checkout 70a242faa308c57be5ed636897dfee77de350773
-rsync -a ../Panther-x2-NPU-VPU/armbian/ ./
-./compile.sh \
-  RELEASE=trixie \
-  BUILD_DESKTOP=no \
-  BUILD_MINIMAL=no \
-  KERNEL_CONFIGURE=no \
-  KERNEL_BTF=no \
-  EXPERT=yes \
-  pantherx2-image build
-```
-
 本仓库负责内核、U-Boot、设备树和系统镜像。Rockchip MPP/RGA/RKNN 用户态库及
 具体推理模型运行环境需要在系统启动后另行安装和验证。
 
-## RKNN 组件管理
+## 实机测试
 
-`scripts/rknn-manager.sh` 可以检测、安装和删除以下三个组件：
-
-- RKNN Runtime：最小 C/C++ 板端推理运行库；
-- RKNN-Toolkit-Lite2：板端 Python 推理接口；
-- 完整 RKNN-Toolkit2：模型转换、量化、优化和导出工具。
-
-在 Panther X2 上运行交互菜单：
-
-```bash
-chmod +x scripts/rknn-manager.sh
-./scripts/rknn-manager.sh
-```
-
-不克隆仓库也可以直接下载脚本：
-
-```bash
-curl -fL \
-  https://raw.githubusercontent.com/clfang666/Panther-x2-NPU-VPU/main/scripts/rknn-manager.sh \
-  -o rknn-manager.sh
-chmod +x rknn-manager.sh
-./rknn-manager.sh
-```
-
-也可以直接执行：
-
-```bash
-./scripts/rknn-manager.sh status
-sudo ./scripts/rknn-manager.sh install runtime
-sudo ./scripts/rknn-manager.sh install lite
-sudo ./scripts/rknn-manager.sh install toolkit
-sudo ./scripts/rknn-manager.sh remove all
-```
-
-脚本固定使用 Rockchip 官方 v2.3.2 ARM64/Python 3.12 包并校验 SHA-256。
-Python 组件分别安装到 `/opt/panther-rknn` 下的独立虚拟环境，不污染系统 Python。
-删除操作只自动清理由此脚本创建的文件，外部安装只检测和报告。
+- ![设备识别](https://s3.431900.xyz/default/OMNIBOOK7-XU/2026/08/mintty_4EhEvEqqHv.png)
+- ![rknn示例](https://s3.431900.xyz/default/OMNIBOOK7-XU/2026/08/mintty_YJdcO0JOlq.png)
 
 ## 上游项目
 
+- [clfang666/Panther-x2-NPU-VPU](https://github.com/clfang666/Panther-x2-NPU-VPU)
 - [Armbian build](https://github.com/armbian/build)
 - [Armbian Rockchip kernel](https://github.com/armbian/linux-rockchip)
 - [Radxa U-Boot](https://github.com/radxa/u-boot)
