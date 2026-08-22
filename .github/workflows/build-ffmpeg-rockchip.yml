@@ -1,0 +1,293 @@
+name: Build FFmpeg with Rockchip Hardware Acceleration
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:  
+        description: Publish ffmpeg deb package for rockchip to a GitHub Release
+        required: false
+        default: false
+        type: boolean
+permissions:
+  contents: write        
+jobs:
+  build:
+    name: Rockchip / Ffmpeg 
+    runs-on: [ self-hosted, linux, arm64 ]   # 使用自托管runner
+
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      MAKEFLAGS: -j$(nproc)
+
+    steps:
+      # -------- 安装系统依赖 --------
+      - name: Install system dependencies
+        run: |
+
+          # 删除所有已有源配置
+          sudo rm -f /etc/apt/sources.list
+          sudo rm -rf /etc/apt/sources.list.d/*
+
+          # 创建 Debian trixie 源 需要non-free 干脆删了重建
+          sudo tee /etc/apt/sources.list > /dev/null <<EOF
+          deb https://mirrors.tuna.tsinghua.edu.cn/debian trixie main contrib non-free non-free-firmware
+          deb https://mirrors.tuna.tsinghua.edu.cn/debian trixie-updates main contrib non-free non-free-firmware
+          deb https://mirrors.tuna.tsinghua.edu.cn/debian trixie-backports main contrib non-free non-free-firmware
+          deb https://mirrors.tuna.tsinghua.edu.cn/debian-security trixie-security main contrib non-free non-free-firmware
+          EOF
+
+          sudo apt update
+          sudo apt install -y \
+            autoconf automake build-essential cmake git-core \
+            libass-dev libfreetype6-dev libgnutls28-dev \
+            libmp3lame-dev libsdl2-dev libtool libva-dev \
+            libvdpau-dev libvorbis-dev libxcb1-dev \
+            libxcb-shm0-dev libx264-dev libx265-dev \
+            libnuma-dev libfdk-aac-dev \
+            meson ninja-build \
+            dpkg-dev dpkg
+
+      # -------- 构建并安装 Rockchip MPP --------
+      - name: Build and install Rockchip MPP
+        run: |
+          git clone -b jellyfin-mpp --depth=1 https://gitee.com/nyanmisaka/mpp.git rkmpp
+          cd rkmpp
+          mkdir build_dir && cd build_dir
+          cmake -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_SHARED_LIBS=ON \
+                -DBUILD_TEST=OFF ..
+          make -j$(nproc)
+          sudo make install
+
+      # -------- 构建并安装 Rockchip RGA --------
+      - name: Build and install Rockchip RGA
+        run: |
+          git clone -b jellyfin-rga --depth=1 https://gitee.com/nyanmisaka/rga.git rkrga
+          meson setup rkrga rkrga_build \
+            --prefix=/usr/local \
+            --libdir=lib \
+            --buildtype=release \
+            --default-library=shared \
+            -Dcpp_args=-fpermissive \
+            -Dlibdrm=false \
+            -Dlibrga_demo=false
+          sudo ninja -C rkrga_build install
+
+      # -------- 构建 FFmpeg（带硬件加速） --------
+      - name: Build FFmpeg with Rockchip support
+        run: |
+          git clone --depth=1 https://github.com/nyanmisaka/ffmpeg-rockchip.git ffmpeg_src
+          cd ffmpeg_src
+          ./configure \
+            --prefix=/usr/local \
+            --enable-gpl \
+            --enable-version3 \
+            --enable-libdrm \
+            --enable-rkmpp \
+            --enable-rkrga \
+            --enable-nonfree \
+            --enable-libx264 \
+            --enable-libx265 \
+            --enable-libfdk-aac
+          make -j$(nproc)
+          sudo make install
+
+      # -------- 更新动态链接器缓存 ----------
+      - name: Update dynamic linker cache
+        run: |
+          echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/ffmpeg-rockchip.conf
+          sudo ldconfig
+
+      # -------- 创建打包脚本（构建deb包） --------
+      - name: Create packaging script
+        run: |
+          cat > build_deb.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+
+          PACKAGE_NAME="ffmpeg-rockchip"
+          PACKAGE_VERSION="1.0.0"
+          ARCH="arm64"
+          SRC_PREFIX="/usr/local"
+
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          BUILD_DIR="${SCRIPT_DIR}/deb-build"
+          PKG_DIR="${BUILD_DIR}/${PACKAGE_NAME}"
+          DEBIAN_DIR="${PKG_DIR}/DEBIAN"
+          BIN_DIR="${PKG_DIR}/usr/local/bin"
+          LIB_DIR="${PKG_DIR}/usr/local/lib"
+          CONF_DIR="${PKG_DIR}/etc/ld.so.conf.d"
+          DEB_FILE="${BUILD_DIR}/${PACKAGE_NAME}_${PACKAGE_VERSION}_${ARCH}.deb"
+          DEP_FILE="${BUILD_DIR}/dependencies.txt"
+
+          # 检查必要命令
+          for cmd in dpkg dpkg-deb dpkg-query ldd readelf file ldconfig; do
+            if ! command -v "$cmd" >/dev/null 2>&1; then
+              echo "ERROR: command not found: $cmd"
+              exit 1
+            fi
+          done
+
+          # 架构检查
+          if [ "$(dpkg --print-architecture)" != "$ARCH" ]; then
+            echo "ERROR: architecture mismatch"
+            exit 1
+          fi
+
+          echo "[1/8] Checking source files..."
+          for f in \
+            "${SRC_PREFIX}/bin/ffmpeg" \
+            "${SRC_PREFIX}/bin/ffprobe" \
+            "${SRC_PREFIX}/lib/librga.so.2" \
+            "${SRC_PREFIX}/lib/librockchip_mpp.so.1"; do
+            if [ ! -e "$f" ]; then
+              echo "ERROR: required file not found: $f"
+              exit 1
+            fi
+          done
+
+          echo "[2/8] Checking binary architecture..."
+          for b in "${SRC_PREFIX}/bin/ffmpeg" "${SRC_PREFIX}/bin/ffprobe"; do
+            if ! file "$b" | grep -qi "aarch64"; then
+              echo "ERROR: not an ARM64 binary: $b"
+              exit 1
+            fi
+          done
+
+          echo "[3/8] Checking runtime dependencies..."
+          MISSING=0
+          for b in "${SRC_PREFIX}/bin/ffmpeg" "${SRC_PREFIX}/bin/ffprobe"; do
+            if ldd "$b" | grep -q "not found"; then
+              ldd "$b" | grep "not found"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            echo "ERROR: missing runtime dependencies"
+            exit 1
+          fi
+
+          echo "[4/8] Preparing directories..."
+          rm -rf "$BUILD_DIR"
+          mkdir -p "$DEBIAN_DIR" "$BIN_DIR" "$LIB_DIR" "$CONF_DIR"
+          touch "$DEP_FILE"
+
+          echo "[5/8] Copying binaries and libraries..."
+          install -m 0755 "${SRC_PREFIX}/bin/ffmpeg" "$BIN_DIR/"
+          install -m 0755 "${SRC_PREFIX}/bin/ffprobe" "$BIN_DIR/"
+          cp -a "${SRC_PREFIX}/lib/librga.so"* "$LIB_DIR/"
+          cp -a "${SRC_PREFIX}/lib/librockchip_mpp.so"* "$LIB_DIR/"
+          cat > "${CONF_DIR}/ffmpeg-rockchip.conf" <<EOC
+          /usr/local/lib
+          EOC
+
+          echo "[6/8] Detecting Debian dependencies..."
+          get_needed() { readelf -d "$1" 2>/dev/null | sed -n 's/.*Shared library: \[\(.*\)\].*/\1/p'; }
+          find_lib() { ldconfig -p | awk -v lib="$1" '$1 == lib {print $NF; exit}'; }
+          find_pkg() {
+            local p
+            p=$(dpkg-query -S "$1" 2>/dev/null | head -n1 | sed 's/: .*//')
+            [ -n "$p" ] && echo "$p" || true
+          }
+
+          process_binary() {
+            local b="$1"
+            echo "Analyzing: $b"
+            while IFS= read -r lib; do
+              [ -z "$lib" ] && continue
+              case "$lib" in
+                librga.so*|librockchip_mpp.so*) echo "  $lib -> bundled"; continue ;;
+              esac
+              path=$(find_lib "$lib")
+              if [ -z "$path" ]; then
+                echo "  $lib -> WARNING: not found"
+                continue
+              fi
+              if [[ "$path" == /usr/local/lib/* ]]; then
+                echo "  $lib -> bundled ($path)"
+                continue
+              fi
+              pkg=$(find_pkg "$path")
+              if [ -n "$pkg" ]; then
+                echo "  $lib -> $pkg"
+                echo "$pkg" >> "$DEP_FILE"
+              else
+                echo "  $lib -> WARNING: no package"
+              fi
+            done < <(get_needed "$b")
+          }
+
+          process_binary "${SRC_PREFIX}/bin/ffmpeg"
+          process_binary "${SRC_PREFIX}/bin/ffprobe"
+
+          DEP_PACKAGES=($(sort -u "$DEP_FILE" || true))
+          DEPENDS=""
+          if [ ${#DEP_PACKAGES[@]} -gt 0 ]; then
+            DEPENDS=$(printf '%s\n' "${DEP_PACKAGES[@]}" | awk 'BEGIN{ORS=""; sep=""} {printf "%s%s",sep,$0; sep=", "}')
+          fi
+
+          echo "[7/8] Generating Debian control..."
+          cat > "${DEBIAN_DIR}/control" <<EOC
+          Package: ${PACKAGE_NAME}
+          Version: ${PACKAGE_VERSION}
+          Section: video
+          Priority: optional
+          Architecture: ${ARCH}
+          Maintainer: local
+          EOC
+          if [ -n "$DEPENDS" ]; then
+            echo "Depends: ${DEPENDS}" >> "${DEBIAN_DIR}/control"
+          fi
+          cat >> "${DEBIAN_DIR}/control" <<'EOC'
+          Description: FFmpeg with Rockchip hardware acceleration
+           Custom FFmpeg build with Rockchip MPP and RGA hardware acceleration.
+           Includes ffmpeg and ffprobe.
+           ffplay is intentionally excluded.
+          EOC
+
+          cat > "${DEBIAN_DIR}/postinst" <<'EOP'
+          #!/bin/sh
+          set -e
+          ldconfig
+          exit 0
+          EOP
+          chmod 0755 "${DEBIAN_DIR}/postinst"
+
+          cat > "${DEBIAN_DIR}/postrm" <<'EOR'
+          #!/bin/sh
+          set -e
+          ldconfig
+          exit 0
+          EOR
+          chmod 0755 "${DEBIAN_DIR}/postrm"
+
+          echo "[8/8] Building .deb package..."
+          dpkg-deb --build --root-owner-group "$PKG_DIR" "$DEB_FILE"
+
+          echo "Package created: $DEB_FILE"
+          du -h "$DEB_FILE"
+          EOF
+
+          chmod +x build_deb.sh
+
+      # -------- 执行打包脚本 --------
+      - name: Build Debian package
+        run: ./build_deb.sh
+
+      # -------- 上传产物 --------
+      - name: Publish GitHub Release
+        if: success() && inputs.publish_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="ffmpeg-rockchip-${GITHUB_RUN_NUMBER}"
+          gh release create "${tag}" \
+            "${GITHUB_WORKSPACE}/deb-build/ffmpeg-rockchip_*.deb" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "FFmpeg with Rockchip hardware build ${GITHUB_RUN_NUMBER}" \
+            --notes "FFmpeg with Rockchip hardware ."          
