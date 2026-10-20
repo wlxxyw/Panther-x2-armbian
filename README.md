@@ -1,7 +1,7 @@
 # Panther X2 NPU/VPU Armbian
 
 - 😺 本项目基于[clfang666/Panther-x2-NPU-VPU](https://github.com/clfang666/Panther-x2-NPU-VPU)项目修改
-- 👍 让Panther X2可以驱动NPU/VPU/GPU，同时蓝牙 USB 功能完好
+- 👍 让Panther X2可以驱动NPU/VPU/GPU，同时蓝牙（仅BLE）USB 功能完好
 - 😋 运行NPU测试需要在python3.11下运行
 ```bash
 cd examples
